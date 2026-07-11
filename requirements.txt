@@ -1,3 +1,5 @@
 crewai
 streamlit
 python-dotenv
+requests
+nest_asyncio

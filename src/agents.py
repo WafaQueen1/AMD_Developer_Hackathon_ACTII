@@ -1,66 +1,160 @@
-import os
 import asyncio
+import requests
 from crewai import Agent, Task, Crew, LLM
 
-def create_startup_crew(api_key: str, repo_url: str, repo_description: str) -> Crew:
-    # إعداد الاتصال بالسيرفر
-    fireworks_llm = LLM(
-        model="fireworks_ai/accounts/fireworks/models/deepseek-v3p1",
+
+def read_github_readme(repo_url: str) -> str:
+    if not repo_url:
+        return "No repository URL provided."
+
+    normalized_url = repo_url.rstrip("/")
+    try:
+        for branch in ["main", "master"]:
+            raw_url = normalized_url.replace("github.com", "raw.githubusercontent.com", 1) + f"/{branch}/README.md"
+            response = requests.get(raw_url, timeout=15)
+            if response.status_code == 200:
+                return response.text[:13000]
+    except Exception:
+        pass
+
+    return "Could not fetch README content."
+
+
+def _build_llm(api_key: str) -> LLM:
+    return LLM(
+        model="fireworks_ai/accounts/fireworks/models/gpt-oss-120b",
         base_url="https://api.fireworks.ai/inference/v1",
         api_key=api_key,
-        temperature=0.3
+        temperature=0.65,
+        max_tokens=2048,
     )
 
-    # بناء الوكلاء
-    repository_auditor = Agent(
-        role="Universal Product & Domain Auditor",
-        goal="Analyze any given repository link and description to discover its business niche, industry vertical, and target audience.",
-        backstory=(
-            "You are an expert venture capitalist and product architect. You can look at any tech startup project—"
-            "whether it is a Shopify plug-in, a fintech payment gateway, an AI model, or an e-commerce platform—"
-            "and instantly map out who needs this product and why it matters."
-        ),
-        llm=fireworks_llm,
-        verbose=True
+
+def _run_single_task(api_key: str, repo_url: str, repo_description: str, readme_content: str, role: str, goal: str, backstory: str, description: str, expected_output: str) -> str:
+    llm = _build_llm(api_key)
+    agent = Agent(
+        role=role,
+        goal=goal,
+        backstory=backstory,
+        llm=llm,
+        verbose=True,
     )
 
-    marketing_strategist = Agent(
-        role="Growth Marketing Specialist",
-        goal="Take the detected domain profile and generate highly converting social media launch copy specifically tailored to that market audience.",
-        backstory=(
-            "You are a growth hacking marketer. If the auditor says the project is E-commerce, you write high-energy sales copy. "
-            "If it is a technical tool, you write deep dev-focused engineering copy. You adapt your tone completely based on the audience."
-        ),
-        llm=fireworks_llm,
-        verbose=True
-    )
-
-    # تحديد المهام
-    task_detect_everything = Task(
+    task = Task(
         description=(
-            f"Examine the following repository details:\n"
-            f"- URL: {repo_url}\n"
-            f"- User Description: {repo_description}\n\n"
-            "Identify the industry sector (e.g., E-commerce, EdTech, SaaS, AI, DevOps). "
-            "Define the exact ideal customer profile (ICP) who would buy or use this startup project."
+            f"Repository URL: {repo_url}\n\n"
+            f"User Description:\n{repo_description}\n\n"
+            f"README:\n{readme_content}\n\n"
+            f"{description}"
         ),
-        expected_output="A complete product profile specifying the detected industry vertical and target buyer persona.",
-        agent=repository_auditor
+        expected_output=expected_output,
+        agent=agent,
     )
 
-    task_tailor_marketing = Task(
+    crew = Crew(agents=[agent], tasks=[task], verbose=True)
+    result = asyncio.run(crew.kickoff_async())
+    return str(result)
+
+
+def run_startup_strategy(api_key: str, repo_url: str, repo_description: str) -> dict:
+    readme_content = read_github_readme(repo_url)
+
+    return {
+        "summary": _run_single_task(
+            api_key=api_key,
+            repo_url=repo_url,
+            repo_description=repo_description,
+            readme_content=readme_content,
+            role="GitHub Repository Analyst",
+            goal="Analyze the repository and README",
+            backstory="You are an expert at understanding open source projects.",
+            description="Analyze and summarize: purpose, key features, target users, and unique strengths.",
+            expected_output="Clear project summary",
+        ),
+        "marketing_posts": _run_single_task(
+            api_key=api_key,
+            repo_url=repo_url,
+            repo_description=repo_description,
+            readme_content=readme_content,
+            role="Technical Marketing Copywriter",
+            goal="Write engaging promotional posts",
+            backstory="Expert in creating content for developers on LinkedIn, X, Reddit, and Hacker News.",
+            description="Write 3 ready-to-post promotional messages (LinkedIn/X, Reddit, Hacker News) tailored to the repository and the user's description.",
+            expected_output="High-quality marketing posts",
+        ),
+        "growth_strategy": _run_single_task(
+            api_key=api_key,
+            repo_url=repo_url,
+            repo_description=repo_description,
+            readme_content=readme_content,
+            role="Open Source Growth Strategist",
+            goal="Create an effective launch and growth strategy",
+            backstory="Specialist in growing GitHub repositories.",
+            description="Create a practical growth and launch strategy for this repository, based on the summary and README content.",
+            expected_output="Actionable plan with steps and timeline.",
+        ),
+    }
+
+
+def create_startup_crew(api_key: str, repo_url: str, repo_description: str) -> Crew:
+    readme_content = read_github_readme(repo_url)
+    fireworks_llm = _build_llm(api_key)
+
+    repo_analyzer = Agent(
+        role="GitHub Repository Analyst",
+        goal="Analyze the repository and README",
+        backstory="You are an expert at understanding open source projects.",
+        llm=fireworks_llm,
+        verbose=True,
+    )
+
+    marketing_writer = Agent(
+        role="Technical Marketing Copywriter",
+        goal="Write engaging promotional posts",
+        backstory="Expert in creating content for developers on LinkedIn, X, Reddit, and Hacker News.",
+        llm=fireworks_llm,
+        verbose=True,
+    )
+
+    growth_expert = Agent(
+        role="Open Source Growth Strategist",
+        goal="Create an effective launch and growth strategy",
+        backstory="Specialist in growing GitHub repositories.",
+        llm=fireworks_llm,
+        verbose=True,
+    )
+
+    task1 = Task(
         description=(
-            "Review the product profile generated by the Auditor. Based on the specified industry vertical, "
-            "draft 2 launch posts (LinkedIn and X) that directly speak to that audience's pain points. "
-            f"Make sure to naturally include the repository link: {repo_url}"
+            f"Repository URL: {repo_url}\n\n"
+            f"User Description:\n{repo_description}\n\n"
+            f"README:\n{readme_content}\n\n"
+            "Analyze and summarize: purpose, key features, target users, and unique strengths."
         ),
-        expected_output="Two tailored marketing copy assets optimized for the specific target industry.",
-        agent=marketing_strategist
+        expected_output="Clear project summary",
+        agent=repo_analyzer,
     )
 
-    # تجميع الـ Crew
+    task2 = Task(
+        description=(
+            "Write 3 ready-to-post promotional messages (LinkedIn/X, Reddit, Hacker News) "
+            "tailored to the repository and the user's description."
+        ),
+        expected_output="High-quality marketing posts",
+        agent=marketing_writer,
+    )
+
+    task3 = Task(
+        description=(
+            "Create a practical growth and launch strategy for this repository, based on the summary "
+            "and README content."
+        ),
+        expected_output="Actionable plan with steps and timeline.",
+        agent=growth_expert,
+    )
+
     return Crew(
-        agents=[repository_auditor, marketing_strategist],
-        tasks=[task_detect_everything, task_tailor_marketing],
-        verbose=True
+        agents=[repo_analyzer, marketing_writer, growth_expert],
+        tasks=[task1, task2, task3],
+        verbose=True,
     )
